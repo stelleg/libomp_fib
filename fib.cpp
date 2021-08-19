@@ -66,6 +66,7 @@ void task_entry(int gtid, ptask parenttask) {
 
 void fork_entry(int *gtid, int *btid, int *n, int *x, int *y){
   if(*n <= 2){
+    // Need to return 1, so any result s.t. x+y = 1 is fine
     *x = 1;
     *y = 0; 
     return;
@@ -77,15 +78,16 @@ void fork_entry(int *gtid, int *btid, int *n, int *x, int *y){
   ptask task;
   pshareds psh;
   
-  // Create task thunk (delayed computation)
-  task = (ptask)__kmpc_omp_task_alloc(NULL, *gtid, PTASK_FLAG_DETACHABLE, sizeof(struct task), sizeof(struct shar), &task_entry);
-  psh = task->shareds;
-  psh->n = *n-1; 
+  // Create task thunk (delayed computation) for fib(n-1) 
+  task = (ptask)__kmpc_omp_task_alloc(NULL, *gtid, PTASK_FLAG_DETACHABLE, 
+                                      sizeof(struct task), sizeof(struct shar), 
+                                      &task_entry);
+  task->shareds->n = *n-1; 
   
   // Submit thunk to runtime
   __kmpc_omp_task(NULL, *gtid, task);
 
-  // Compute the second call while 
+  // Compute the second call while waiting
   *y = fib(*n-2);
   
   // Wait for the (n-1) call to finish
@@ -94,12 +96,11 @@ void fork_entry(int *gtid, int *btid, int *n, int *x, int *y){
   // Copy the result over
   *x = task->shareds->x; 
   __kmpc_end_single(NULL, *gtid); 
-  //__kmpc_end_single(NULL, *gtid); 
- 
 }
 
 int fib(int n) {
   int x, y;
+  // Ensures tasking is run in a context where threads are initialized
   __kmpc_fork_call(NULL, 3, (fork_entry_t)&fork_entry, &n, &x, &y);
   return x + y;   
 }
