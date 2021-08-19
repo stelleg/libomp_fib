@@ -20,7 +20,7 @@ typedef struct {
 
 typedef struct shar { // shareds used in the task
   int n; 
-  int x;
+  int *x;
 } *pshareds;
 
 typedef struct task {
@@ -33,39 +33,27 @@ typedef struct task {
 typedef void(*fork_entry_t)(int*, int*, ...);
 typedef void(*task_entry_t)(int, ptask);
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-extern int __kmpc_global_thread_num(void *id_ref);
 extern ptask __kmpc_omp_task_alloc(ident_t *loc, int gtid, int flags,
                                    size_t sz, size_t shar, task_entry_t rtn);
-
-extern omp_event_handle_t __kmpc_task_allow_completion_event(
-                              ident_t *loc_ref, int gtid, ptask task);
-
 extern void __kmpc_fork_call(ident_t *, int nargs, 
                        fork_entry_t microtask, ...);
-                
 extern int __kmpc_omp_task(ident_t *loc_ref, int gtid, ptask task);                 
 extern int __kmpc_omp_taskwait(ident_t *loc_ref, int gtid);
-
 extern int __kmpc_single(ident_t *loc_ref, int gtid);
-extern int __kmpc_end_single(ident_t *loc_ref, int gtid);
-#if __cplusplus
-}
-#endif
+extern void __kmpc_end_single(ident_t *loc_ref, int gtid);
+extern void __kmpc_barrier(ident_t *loc_ref, int gtid);
 
 int fib(int n);
 
 // User's code, outlined into task entry
-void task_entry(int gtid, ptask parenttask) {
-  int n = parenttask->shareds->n;  
-  parenttask->shareds->x = fib(n); 
+void task_entry(int gtid, ptask task) {
+  int n = task->shareds->n;  
+  *(task->shareds->x) = fib(n); 
 }
 
-void fork_entry(int *gtid, int *btid, int *n, int *x, int *y){
-  if(*n <= 2){
+void fork_entry(int *pgtid, int *btid, int *pn, int *x, int *y){
+  int gtid = *pgtid, n = *pn;
+  if(n <= 2){
     // Need to return 1, so any result s.t. x+y = 1 is fine
     *x = 1;
     *y = 0; 
@@ -74,31 +62,36 @@ void fork_entry(int *gtid, int *btid, int *n, int *x, int *y){
 
   // Now that we've entered a parellel context, ensure only one thread
   // continues with the following code
-  __kmpc_single(NULL, *gtid);
-  ptask task;
-  pshareds psh;
-  
-  // Create task thunk (delayed computation) for fib(n-1) 
-  task = (ptask)__kmpc_omp_task_alloc(NULL, *gtid, PTASK_FLAG_DETACHABLE, 
-                                      sizeof(struct task), sizeof(struct shar), 
-                                      &task_entry);
-  task->shareds->n = *n-1; 
-  
-  // Submit thunk to runtime
-  __kmpc_omp_task(NULL, *gtid, task);
+  if(__kmpc_single(NULL, gtid)){
+    ptask task;
+    pshareds psh;
+    
+    // Create task thunk (delayed computation) for fib(n-1) 
+    task = (ptask)__kmpc_omp_task_alloc(NULL, gtid, 1, 
+                                        sizeof(struct task), sizeof(struct shar), 
+                                        &task_entry);
+    task->shareds->n = n-1; 
+    task->shareds->x = x; 
+    
+    // Submit thunk to runtime
+    __kmpc_omp_task(NULL, gtid, task);
 
-  // Compute the second call while waiting
-  *y = fib(*n-2);
-  
-  // Wait for the (n-1) call to finish
-  __kmpc_omp_taskwait(NULL, *gtid);
+    // Compute the second call while waiting
+    *y = fib(n-2);
+    
+    // Wait for the (n-1) call to finish
+    __kmpc_omp_taskwait(NULL, gtid);
+    __kmpc_end_single(NULL, gtid); 
+  } 
+  __kmpc_barrier(NULL, gtid); 
+}
 
-  // Copy the result over
-  *x = task->shareds->x; 
-  __kmpc_end_single(NULL, *gtid); 
+int serialfib(int n){
+  return n <= 2 ? 1 : serialfib(n-1) + serialfib(n-2); 
 }
 
 int fib(int n) {
+  if(n < 35) return serialfib(n); 
   int x, y;
   // Ensures tasking is run in a context where threads are initialized
   __kmpc_fork_call(NULL, 3, (fork_entry_t)&fork_entry, &n, &x, &y);
@@ -106,7 +99,6 @@ int fib(int n) {
 }
 
 int main(int argc, char **argv) {
-  int n = argc > 1 ? atoi(argv[1]) : 10;
+  int n = argc > 1 ? atoi(argv[1]) : 40; 
   printf("%d\n", fib(n));
-  return 0;
 }
